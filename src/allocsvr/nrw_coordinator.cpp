@@ -81,12 +81,17 @@ RequestLeaseResponse NRWCoordinator::RequestLease(uint32_t section_id,
 
     if (success.load() >= w_) {
         // Return the response with max_seq (take the highest seen).
+        // Always pick the best expire_time_ms independently of max_seq.
         RequestLeaseResponse best;
         best.set_error_code(ErrorCode::OK);
         for (auto& r : resps) {
-            if (r.error_code() == ErrorCode::OK && r.max_seq() > best.max_seq()) {
-                best.set_max_seq(r.max_seq());
-                best.set_expire_time_ms(r.expire_time_ms());
+            if (r.error_code() == ErrorCode::OK) {
+                if (r.max_seq() > best.max_seq()) {
+                    best.set_max_seq(r.max_seq());
+                }
+                if (r.expire_time_ms() > best.expire_time_ms()) {
+                    best.set_expire_time_ms(r.expire_time_ms());
+                }
             }
         }
         return best;
@@ -136,16 +141,18 @@ RenewLeaseResponse NRWCoordinator::RenewLease(uint32_t section_id,
 }
 
 void NRWCoordinator::ReleaseLease(uint32_t section_id, const std::string& addr) {
+    std::vector<std::thread> threads;
     for (size_t i = 0; i < peers_.size(); i++) {
-        std::thread([this, i, section_id, addr]() {
+        threads.emplace_back([this, i, section_id, addr]() {
             brpc::Controller cntl;
             ReleaseLeaseRequest req;
             ReleaseLeaseResponse resp;
             req.set_section_id(section_id);
             req.set_holder_addr(addr);
             peers_[i].stub->ReleaseLease(&cntl, &req, &resp, nullptr);
-        }).detach();
+        });
     }
+    for (auto& t : threads) t.join();
 }
 
 }  // namespace seqsvr
