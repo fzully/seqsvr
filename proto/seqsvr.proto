@@ -1,0 +1,128 @@
+syntax = "proto3";
+package seqsvr;
+
+enum ErrorCode {
+    OK            = 0;
+    LEASE_EXPIRED = 1;
+    STORE_ERROR   = 2;
+    REDIRECT      = 3;
+    CONFLICT      = 4;
+    NOT_FOUND     = 5;
+}
+
+message RouteEntry {
+    uint32 section_id    = 1;
+    string allocsvr_addr = 2;
+}
+
+message RouteTable {
+    int32            version = 1;
+    repeated RouteEntry entries = 2;
+}
+
+// ── AllocService (Client → AllocSvr) ──────────────────────────────────────
+
+message GetSeqRequest {
+    oneof key {
+        uint64 uid        = 1;
+        string global_key = 2;
+        uint64 session_id = 3;
+    }
+    int32 route_ver = 4;
+}
+
+message GetSeqResponse {
+    ErrorCode  error_code    = 1;
+    string     error_msg     = 2;
+    uint64     seqno         = 3;
+    int32      route_ver     = 4;
+    RouteTable route         = 5;
+    string     redirect_addr = 6;
+}
+
+service AllocService {
+    rpc GetSeq(GetSeqRequest) returns (GetSeqResponse);
+}
+
+// ── StoreService (AllocSvr → StoreSvr) ────────────────────────────────────
+
+message UpdateMaxSeqRequest {
+    uint32 section_id  = 1;
+    uint64 new_max_seq = 2;
+}
+
+message UpdateMaxSeqResponse {
+    ErrorCode error_code = 1;
+    string    error_msg  = 2;
+}
+
+message GetMaxSeqRequest {
+    uint32 section_id = 1;
+}
+
+message GetMaxSeqResponse {
+    ErrorCode error_code = 1;
+    uint64    max_seq    = 2;
+}
+
+message LeaseRecord {
+    string holder_addr    = 1;
+    int64  expire_time_ms = 2;
+}
+
+message RequestLeaseRequest {
+    uint32 section_id     = 1;
+    string requester_addr = 2;
+}
+
+message RequestLeaseResponse {
+    ErrorCode   error_code     = 1;
+    string      error_msg      = 2;
+    uint64      max_seq        = 3;
+    int64       expire_time_ms = 4;
+    LeaseRecord current        = 5;
+}
+
+message RenewLeaseRequest {
+    uint32 section_id = 1;
+    string holder_addr = 2;
+}
+
+message RenewLeaseResponse {
+    ErrorCode error_code        = 1;
+    int64     new_expire_time_ms = 2;
+}
+
+message ReleaseLeaseRequest {
+    uint32 section_id  = 1;
+    string holder_addr = 2;
+}
+
+message ReleaseLeaseResponse {
+    ErrorCode error_code = 1;
+}
+
+message GetRouteTableRequest {}
+
+message GetRouteTableResponse {
+    ErrorCode  error_code = 1;
+    RouteTable route      = 2;
+}
+
+message UpdateRouteTableRequest {
+    RouteTable route = 1;
+}
+
+message UpdateRouteTableResponse {
+    ErrorCode error_code = 1;
+}
+
+service StoreService {
+    rpc UpdateMaxSeq(UpdateMaxSeqRequest) returns (UpdateMaxSeqResponse);
+    rpc GetMaxSeq(GetMaxSeqRequest)       returns (GetMaxSeqResponse);
+    rpc RequestLease(RequestLeaseRequest) returns (RequestLeaseResponse);
+    rpc RenewLease(RenewLeaseRequest)     returns (RenewLeaseResponse);
+    rpc ReleaseLease(ReleaseLeaseRequest) returns (ReleaseLeaseResponse);
+    rpc GetRouteTable(GetRouteTableRequest)       returns (GetRouteTableResponse);
+    rpc UpdateRouteTable(UpdateRouteTableRequest) returns (UpdateRouteTableResponse);
+}
