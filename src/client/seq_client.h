@@ -11,7 +11,7 @@ namespace seqsvr {
 
 class SeqClient {
 public:
-    static constexpr int kMaxRetry     = 3;
+    static constexpr int kMaxRetry     = 4;  // 1 initial + 3 retries (50/100/200 ms backoff)
     static constexpr int kTimeoutMs    = 500;
     static constexpr int kInitBackoff  = 50;
 

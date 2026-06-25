@@ -24,8 +24,10 @@ void AllocServiceImpl::GetSeq(::google::protobuf::RpcController*,
 
     auto it = sections_->find(section_id);
     if (it == sections_->end()) {
+        // Section not owned by this node; client should consult route table or retry
         resp->set_error_code(ErrorCode::REDIRECT);
         resp->set_error_msg("section not owned by this node");
+        // redirect_addr intentionally empty: route table not yet populated
         return;
     }
 

@@ -13,6 +13,7 @@ DEFINE_string(store_addrs, "", "Comma-separated StoreSvr addresses, e.g. 127.0.0
 DEFINE_string(sections, "0", "Comma-separated section IDs to own");
 DEFINE_string(my_addr, "", "This node's address (ip:port), auto-detected if empty");
 DEFINE_uint64(step, 10000, "Seqno step for normal sections");
+DEFINE_uint64(global_step, 1000, "Seqno step for global-key sections");
 
 static std::vector<std::string> Split(const std::string& s, char delim) {
     std::vector<std::string> out;
