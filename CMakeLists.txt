@@ -68,6 +68,8 @@ set(BRPC_LINK_LIBS
     dl z
 )
 
+enable_testing()
+
 add_subdirectory(src/common)
 add_subdirectory(src/storesvr)
 add_subdirectory(src/allocsvr)
