@@ -139,6 +139,7 @@ TEST_F(FullFlowTest, StoreSvrOneNodeDown) {
     // Kill one StoreSvr — NRW W=2 should still work
     stores_[2]->server.Stop(0);
     stores_[2]->server.Join();
+    stores_.erase(stores_.begin() + 2);  // prevent double-stop in TearDown
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     SeqClient client("127.0.0.1:19100");
