@@ -1,7 +1,9 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <ctime>
 #include <iostream>
+#include <string>
 #include <thread>
 #include <vector>
 #include <algorithm>
@@ -19,6 +21,9 @@ using namespace std::chrono;
 struct Stats {
     std::vector<int64_t> latencies_us;
     uint64_t errors{0};
+    uint64_t err_store{0};
+    uint64_t err_lease{0};
+    uint64_t err_other{0};
 };
 
 int main(int argc, char* argv[]) {
@@ -37,7 +42,9 @@ int main(int argc, char* argv[]) {
     auto worker = [&](int tid) {
         Stats& stat = per_thread[tid];
         stat.latencies_us.reserve(200000);
-        uint64_t uid = FLAGS_uid + static_cast<uint64_t>(tid) * 10000;
+        // Spread threads across distinct sections (section_id = uid / 100000).
+        // The AllocSvr must own sections 0..threads-1 for this to avoid REDIRECT.
+        uint64_t uid = FLAGS_uid + static_cast<uint64_t>(tid) * 100000;
         while (running.load(std::memory_order_relaxed)) {
             auto t0 = steady_clock::now();
             auto r  = client.GetSeq(uid);
@@ -47,6 +54,11 @@ int main(int argc, char* argv[]) {
                     duration_cast<microseconds>(t1 - t0).count());
             } else {
                 stat.errors++;
+                switch (r.error_code()) {
+                case seqsvr::ErrorCode::STORE_ERROR:  stat.err_store++; break;
+                case seqsvr::ErrorCode::LEASE_EXPIRED: stat.err_lease++; break;
+                default: stat.err_other++; break;
+                }
             }
         }
     };
@@ -60,10 +72,13 @@ int main(int argc, char* argv[]) {
 
     // Aggregate
     std::vector<int64_t> all;
-    uint64_t total_errors = 0;
+    uint64_t total_errors = 0, total_err_store = 0, total_err_lease = 0, total_err_other = 0;
     for (auto& s : per_thread) {
         all.insert(all.end(), s.latencies_us.begin(), s.latencies_us.end());
-        total_errors += s.errors;
+        total_errors     += s.errors;
+        total_err_store  += s.err_store;
+        total_err_lease  += s.err_lease;
+        total_err_other  += s.err_other;
     }
     std::sort(all.begin(), all.end());
 
@@ -81,7 +96,10 @@ int main(int argc, char* argv[]) {
 
     std::cout << "=== Results ===\n"
               << "Total ops:  " << total_ops << "\n"
-              << "Errors:     " << total_errors << "\n"
+              << "Errors:     " << total_errors
+              << " (STORE_ERROR=" << total_err_store
+              << " LEASE_EXPIRED=" << total_err_lease
+              << " other=" << total_err_other << ")\n"
               << "QPS:        " << static_cast<int>(qps) << "\n"
               << "Avg lat:    " << static_cast<int>(avg_us) << " us ("
               << avg_us / 1000.0 << " ms)\n"
@@ -90,9 +108,10 @@ int main(int argc, char* argv[]) {
               << "P99 lat:    " << percentile(99) << " us\n"
               << "P999 lat:   " << percentile(99.9) << " us\n";
 
-    // Write report
-    FILE* f = fopen("perf_report.md", "w");
-    if (f) {
+    // Write report. The canonical perf_report.md is overwritten each run; a
+    // timestamped copy is also saved under test_results/ so multiple runs
+    // accumulate for comparison.
+    auto write_report = [&](FILE* f) {
         fprintf(f, "# SeqSvr Performance Report\n\n");
         fprintf(f, "## Configuration\n\n");
         fprintf(f, "| Parameter | Value |\n|-----------|-------|\n");
@@ -102,15 +121,44 @@ int main(int argc, char* argv[]) {
         fprintf(f, "## Results\n\n");
         fprintf(f, "| Metric | Value |\n|--------|-------|\n");
         fprintf(f, "| Total operations | %lu |\n", (unsigned long)total_ops);
-        fprintf(f, "| Errors           | %lu |\n", (unsigned long)total_errors);
+        fprintf(f, "| Errors           | %lu (STORE_ERROR=%lu LEASE_EXPIRED=%lu other=%lu) |\n",
+                (unsigned long)total_errors,
+                (unsigned long)total_err_store,
+                (unsigned long)total_err_lease,
+                (unsigned long)total_err_other);
         fprintf(f, "| QPS              | %.0f |\n", qps);
         fprintf(f, "| Avg latency      | %.2f ms |\n", avg_us / 1000.0);
         fprintf(f, "| P50 latency      | %.2f ms |\n", percentile(50) / 1000.0);
         fprintf(f, "| P95 latency      | %.2f ms |\n", percentile(95) / 1000.0);
         fprintf(f, "| P99 latency      | %.2f ms |\n", percentile(99) / 1000.0);
         fprintf(f, "| P99.9 latency    | %.2f ms |\n", percentile(99.9) / 1000.0);
+    };
+
+    if (FILE* f = fopen("perf_report.md", "w")) {
+        write_report(f);
         fclose(f);
         std::cout << "\nReport written to perf_report.md\n";
+    }
+
+    // Timestamped archive copy: test_results/bench_YYYYmmdd-HHMMSS.md
+    {
+        std::time_t now = std::time(nullptr);
+        std::tm tm{};
+        localtime_r(&now, &tm);
+        char ts[32];
+        std::strftime(ts, sizeof(ts), "%Y%m%d-%H%M%S", &tm);
+        std::string path = std::string("test_results/bench_") + ts + ".md";
+        if (FILE* f = fopen(path.c_str(), "w")) {
+            write_report(f);
+            fprintf(f, "\n## Run metadata\n\n");
+            fprintf(f, "| Field | Value |\n|-------|-------|\n");
+            fprintf(f, "| Timestamp | %s |\n", ts);
+            fclose(f);
+            std::cout << "Archived copy written to " << path << "\n";
+        } else {
+            std::cout << "Could not open " << path
+                      << " (create the test_results/ directory first)\n";
+        }
     }
     return 0;
 }

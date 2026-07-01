@@ -1,33 +1,58 @@
 #include <gtest/gtest.h>
 #include <atomic>
+#include <chrono>
 #include <thread>
 #include "allocsvr/section_state.h"
 
 using namespace seqsvr;
 
+// Helper: poll TryAlloc until it succeeds (the background refill is in flight)
+// or give up after a timeout. The async design returns a retryable STORE_ERROR
+// while the StoreSvr write has not finished, so callers must retry.
+static uint64_t WaitAndAlloc(SectionState& s,
+                             const std::function<uint64_t(uint64_t)>& fetch) {
+    for (int i = 0; i < 500; i++) {
+        auto r = s.TryAlloc(fetch);
+        if (r.ok()) return r.value();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return 0;
+}
+
 TEST(SectionState, BasicAlloc) {
-    SectionState s(1, /*step=*/10);
+    SectionState s(1, /*step=*/1000);
     s.Reset(100);
     s.SetLease(NowMs() + 30000);
 
-    int fetch_calls = 0;
-    auto fetch = [&](uint64_t /*old_max*/) -> uint64_t {
+    std::atomic<int> fetch_calls{0};
+    auto fetch = [&](uint64_t old_max) -> uint64_t {
         fetch_calls++;
-        return 200;
+        return old_max + 1000;
     };
 
-    // First alloc: cur_seq goes from 100 to 101; 101 > 100 → fetch!
+    // First alloc: buffer exhausted (cur_seq=101 > max_seq=100) → an async
+    // refill is kicked off and a retryable STORE_ERROR is returned, instead of
+    // blocking the caller on the StoreSvr write.
     auto r1 = s.TryAlloc(fetch);
-    ASSERT_TRUE(r1.ok());
-    EXPECT_EQ(r1.value(), 101u);
-    EXPECT_EQ(fetch_calls, 1);
+    EXPECT_FALSE(r1.ok());
+    EXPECT_EQ(r1.error_code(), ErrorCode::STORE_ERROR);
 
-    // Now max_seq = 200. Next allocs up to 200 should not trigger fetch.
+    // Once the background refill finishes, allocs succeed starting at 101.
+    uint64_t v = WaitAndAlloc(s, fetch);
+    ASSERT_NE(v, 0u);
+    EXPECT_EQ(v, 101u);
+    EXPECT_GE(fetch_calls.load(), 1);
+
+    // Allocs well below the 50% prefetch watermark (1100 - 500 = 600) must not
+    // trigger another fetch.
     for (int i = 0; i < 98; i++) {
         auto r = s.TryAlloc(fetch);
-        ASSERT_TRUE(r.ok());
+        ASSERT_TRUE(r.ok()) << r.error_msg();
     }
-    EXPECT_EQ(fetch_calls, 1);
+    EXPECT_EQ(fetch_calls.load(), 1);
+
+    // Join the background thread before reference-captured locals go away.
+    s.JoinBackground();
 }
 
 TEST(SectionState, LeaseExpired) {
@@ -45,7 +70,9 @@ TEST(SectionState, FetchFailureRollsBack) {
     s.Reset(0);
     s.SetLease(NowMs() + 30000);
 
-    auto r = s.TryAlloc([](uint64_t) -> uint64_t { return 0; });  // 0 signals failure
+    // Buffer exhausted → retryable STORE_ERROR returned immediately; the
+    // background fetch that returns 0 is recorded as a failed refill.
+    auto r = s.TryAlloc([](uint64_t) -> uint64_t { return 0; });
     EXPECT_FALSE(r.ok());
     EXPECT_EQ(r.error_code(), ErrorCode::STORE_ERROR);
 }
@@ -78,9 +105,15 @@ TEST(SectionState, MonotonicUnderConcurrency) {
     }
     for (auto& th : threads) th.join();
 
-    // All seqnos must be distinct and > 0
+    // Join the background refill thread before fetch_calls (a reference-captured
+    // local declared after s) is destroyed.
+    s.JoinBackground();
+
+    // All seqnos must be distinct and strictly increasing.
     std::sort(results.begin(), results.end());
     for (size_t i = 1; i < results.size(); i++) {
         EXPECT_GT(results[i], results[i-1]) << "duplicate or non-monotonic seqno";
     }
+    // The background refill must have run at least once.
+    EXPECT_GE(fetch_calls.load(), 1);
 }

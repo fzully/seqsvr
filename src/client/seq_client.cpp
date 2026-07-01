@@ -1,5 +1,6 @@
 #include "seq_client.h"
 #include <thread>
+#include <butil/logging.h>
 
 namespace seqsvr {
 
@@ -48,6 +49,8 @@ StatusOr<uint64_t> SeqClient::DoGetSeq(const GetSeqRequest& req) {
         stub.GetSeq(&cntl, &req, &resp, nullptr);
 
         if (cntl.Failed()) {
+            LOG(WARNING) << "[client] RPC failed attempt=" << attempt
+                         << " err=" << cntl.ErrorText();
             continue;  // network error → retry
         }
 
@@ -67,6 +70,8 @@ StatusOr<uint64_t> SeqClient::DoGetSeq(const GetSeqRequest& req) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         case ErrorCode::STORE_ERROR:
+            LOG(WARNING) << "[client] server STORE_ERROR attempt=" << attempt
+                         << " msg=" << resp.error_msg();
             continue;
         default:
             return StatusOr<uint64_t>(resp.error_code(), resp.error_msg());

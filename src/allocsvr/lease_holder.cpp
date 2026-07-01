@@ -51,6 +51,10 @@ void LeaseHolder::Stop() {
     for (auto& [sid, state] : *sections_) {
         nrw_->ReleaseLease(sid, my_addr_);
         state.ClearLease();
+        // Wait for any in-flight async refills before NRWCoordinator (and the
+        // section map) are destroyed; otherwise the background fetch thread
+        // would touch freed memory via the captured nrw pointer.
+        state.JoinBackground();
     }
 }
 

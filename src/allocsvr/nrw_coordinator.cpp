@@ -2,6 +2,7 @@
 #include <atomic>
 #include <thread>
 #include <brpc/controller.h>
+#include <butil/logging.h>
 
 namespace seqsvr {
 
@@ -21,6 +22,7 @@ NRWCoordinator::NRWCoordinator(const std::vector<std::string>& store_addrs) {
 
 bool NRWCoordinator::WriteMaxSeq(uint32_t section_id, uint64_t new_max_seq) {
     std::atomic<int> success{0};
+    std::vector<std::string> peer_results(peers_.size());
     std::vector<std::thread> threads;
     for (size_t i = 0; i < peers_.size(); i++) {
         threads.emplace_back([&, i]() {
@@ -32,11 +34,24 @@ bool NRWCoordinator::WriteMaxSeq(uint32_t section_id, uint64_t new_max_seq) {
             peers_[i].stub->UpdateMaxSeq(&cntl, &req, &resp, nullptr);
             if (!cntl.Failed() && resp.error_code() == ErrorCode::OK) {
                 success.fetch_add(1, std::memory_order_relaxed);
+                peer_results[i] = "OK";
+            } else {
+                peer_results[i] = cntl.Failed()
+                    ? ("RPC_ERR:" + cntl.ErrorText())
+                    : ("APP_ERR:" + std::to_string(resp.error_code()));
             }
         });
     }
     for (auto& t : threads) t.join();
-    return success.load() >= w_;
+    int n = success.load();
+    if (n < w_) {
+        LOG(WARNING) << "[section=" << section_id << "] WriteMaxSeq FAILED"
+                     << " confirmations=" << n << "/" << peers_.size()
+                     << " new_max=" << new_max_seq
+                     << " peers=[" << peer_results[0] << "," << peer_results[1]
+                     << "," << peer_results[2] << "]";
+    }
+    return n >= w_;
 }
 
 uint64_t NRWCoordinator::ReadMaxSeq(uint32_t section_id) {

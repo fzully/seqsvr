@@ -31,10 +31,17 @@ void AllocServiceImpl::GetSeq(::google::protobuf::RpcController*,
         return;
     }
 
-    auto result = it->second.TryAlloc([&](uint64_t old_max) -> uint64_t {
-        uint64_t new_max = old_max + it->second.step();
-        return nrw_->WriteMaxSeq(section_id, new_max) ? new_max : 0;
-    });
+    // The fetch closure is stored by SectionState and invoked asynchronously
+    // by a background thread, so it must capture only values (pointers to
+    // long-lived objects + scalars), never references to GetSeq's stack.
+    NRWCoordinator* nrw = nrw_;
+    uint32_t sid = section_id;
+    uint64_t step = it->second.step();
+    auto result = it->second.TryAlloc(
+        [nrw, sid, step](uint64_t old_max) -> uint64_t {
+            uint64_t new_max = old_max + step;
+            return nrw->WriteMaxSeq(sid, new_max) ? new_max : 0;
+        });
 
     if (!result.ok()) {
         resp->set_error_code(result.error_code());
